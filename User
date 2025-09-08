@@ -1,0 +1,185 @@
+#!/bin/bash
+# ==========================================================
+# Shrish's User Script
+# ==========================================================
+# REQUIREMENTS:
+#   - Place this script in ~/Scripts
+#   - Run as a normal user (not root) with sudo privileges
+# ==========================================================
+
+# --- Setup ---
+WHO=$(whoami)
+SCRIPTS_DIR="/home/$WHO/Scripts"
+mkdir -p "$SCRIPTS_DIR"
+
+# Files for logging and storing state
+AUTH_FILE="$SCRIPTS_DIR/authorized.txt"
+AUTH_ADMINS="$SCRIPTS_DIR/authorizedadmins.txt"
+UNAUTH_FILE="$SCRIPTS_DIR/unauthorized.txt"
+UNAUTH_ROOT="$SCRIPTS_DIR/unauthorizedroot.txt"
+SYSTEM_USERS_FILE="$SCRIPTS_DIR/systemusers.txt"
+UNAUTH_ADMINS_FILE="$SCRIPTS_DIR/unauthorizedadminssudoers.txt"
+SUMMARY_FILE="$SCRIPTS_DIR/summary.txt"
+
+# Clear old files and recreate
+> "$AUTH_FILE"
+> "$AUTH_ADMINS"
+> "$UNAUTH_FILE"
+> "$UNAUTH_ROOT"
+> "$SYSTEM_USERS_FILE"
+> "$UNAUTH_ADMINS_FILE"
+> "$SUMMARY_FILE"
+
+# --- Test Run Prompt ---
+echo "Do you want to run in TEST MODE (no actual changes, just print actions)?"
+select yn in "Yes" "No"; do
+    case $yn in
+        Yes ) TESTRUN=true; break;;
+        No ) TESTRUN=false; break;;
+    esac
+done
+
+# --- Gather Authorized Users ---
+echo "Enter authorized users (including admins). Press enter on an empty line to finish:"
+while true; do
+    read -p "User: " user
+    [[ -z "$user" ]] && break
+    echo "$user" >> "$AUTH_FILE"
+done
+
+# --- Gather Authorized Admins ---
+echo -e "\nEnter authorized admins (will be added to sudo/adm). Press enter on an empty line to finish:"
+while true; do
+    read -p "Admin: " admin
+    [[ -z "$admin" ]] && break
+    echo "$admin" >> "$AUTH_ADMINS"
+done
+
+# --- Identify Users ---
+USERS=$(awk -F: '$3 >= 1000 && $3 < 65534 {print $1}' /etc/passwd | grep -Ev "^$WHO$")
+AUTHORIZED_USERS=$(cat "$AUTH_FILE")
+UNAUTHORIZED_USERS=$(echo "$USERS" | grep -vxFf <(echo "$AUTHORIZED_USERS"))
+
+UNAUTHORIZED_ROOT_USERS=$(awk -F: '$3 == 0 {print $1}' /etc/passwd | grep -v "^root$")
+SYSTEM_USERS=$(awk -F: '$3 < 1000 && $3 > 0 {print $1}' /etc/passwd | grep -v "^root$")
+
+# Save categorized lists
+echo "$UNAUTHORIZED_USERS" > "$UNAUTH_FILE"
+echo "$UNAUTHORIZED_ROOT_USERS" > "$UNAUTH_ROOT"
+echo "$SYSTEM_USERS" > "$SYSTEM_USERS_FILE"
+
+echo -e "\n$WHO is running this script\n"
+
+# --- Helper Function to run commands ---
+run_or_print() {
+    if $TESTRUN; then
+        echo "[TEST] $*"
+    else
+        eval "$@"
+    fi
+}
+
+# --- Reset Passwords ---
+echo -e "\n--- Resetting passwords for authorized users (except $WHO) ---"
+while IFS= read -r user; do
+  if [[ "$user" != "$WHO" ]]; then
+    run_or_print "echo \"$user:CyberPatriot123!\" | sudo chpasswd"
+    echo "Password reset for $user" >> "$SUMMARY_FILE"
+  fi
+done < "$AUTH_FILE"
+
+# --- Set Shells ---
+echo -e "\n--- Ensuring authorized users use /bin/bash ---"
+while IFS= read -r user; do
+  run_or_print "sudo usermod -s /bin/bash \"$user\""
+  echo "Shell set to /bin/bash for $user" >> "$SUMMARY_FILE"
+done < "$AUTH_FILE"
+
+# --- Password Age Policy ---
+echo -e "\n--- Enforcing password age policy (max 90 days, min 7 days) ---"
+while IFS= read -r user; do
+  run_or_print "sudo chage -M 90 -m 7 -W 14 \"$user\""
+  echo "Password aging set for $user" >> "$SUMMARY_FILE"
+done < "$AUTH_FILE"
+
+# --- Ensure Authorized Users Exist ---
+echo -e "\n--- Adding missing authorized users ---"
+while IFS= read -r user; do
+  if ! id "$user" &>/dev/null; then
+    run_or_print "sudo adduser --disabled-password --gecos \"\" \"$user\""
+    echo "Added missing authorized user: $user" >> "$SUMMARY_FILE"
+  fi
+done < "$AUTH_FILE"
+
+# --- Home Directory Ownership ---
+echo -e "\n--- Fixing home directory ownership ---"
+while IFS= read -r user; do
+  if [[ -d /home/$user ]]; then
+    run_or_print "sudo chown -R \"$user:$user\" \"/home/$user\""
+    echo "Fixed home ownership for $user" >> "$SUMMARY_FILE"
+  fi
+done < "$AUTH_FILE"
+
+# --- Secure Home Directory Permissions ---
+echo -e "\n--- Securing home directories ---"
+while IFS= read -r user; do
+  if [[ -d /home/$user ]]; then
+    run_or_print "sudo chmod 750 \"/home/$user\""
+    run_or_print "sudo setfacl -b \"/home/$user\""
+    run_or_print "sudo chattr -ai \"/home/$user\""
+    echo "Secured home directory for $user" >> "$SUMMARY_FILE"
+  fi
+done < "$AUTH_FILE"
+
+# --- Remove Unauthorized Users ---
+echo -e "\n--- Removing unauthorized users ---"
+while IFS= read -r user; do
+  run_or_print "sudo deluser --remove-home \"$user\""
+  echo "Removed unauthorized user: $user" >> "$SUMMARY_FILE"
+done < "$UNAUTH_FILE"
+
+# --- Remove Unauthorized Root Users ---
+echo -e "\n--- Removing unauthorized root users ---"
+while IFS= read -r rootuser; do
+  run_or_print "sudo userdel \"$rootuser\""
+  echo "Removed unauthorized root user: $rootuser" >> "$SUMMARY_FILE"
+done < "$UNAUTH_ROOT"
+
+# --- Lock System Users ---
+echo -e "\n--- Locking system accounts ---"
+while IFS= read -r sysuser; do
+  run_or_print "sudo usermod -s /usr/sbin/nologin \"$sysuser\""
+  run_or_print "sudo passwd -l \"$sysuser\""
+  echo "Locked system account: $sysuser" >> "$SUMMARY_FILE"
+done < "$SYSTEM_USERS_FILE"
+
+# --- Manage Admins ---
+echo -e "\n--- Ensuring only authorized admins have sudo/adm ---"
+
+# Add all authorized admins to sudo and adm
+while IFS= read -r admin; do
+  run_or_print "sudo usermod -aG sudo,adm \"$admin\""
+  echo "Ensured $admin is an admin" >> "$SUMMARY_FILE"
+done < "$AUTH_ADMINS"
+
+# Remove unauthorized admins from sudo and adm
+# Get all current members of sudo and adm
+CURRENT_ADMINS=$(getent group sudo | awk -F: '{print $4}' | tr ',' '\n'; getent group adm | awk -F: '{print $4}' | tr ',' '\n' | sort -u)
+
+while IFS= read -r user; do
+  # If user is not in authorized admins, remove from sudo and adm
+  if ! grep -qxF "$user" "$AUTH_ADMINS"; then
+    run_or_print "sudo gpasswd -d \"$user\" sudo"
+    run_or_print "sudo gpasswd -d \"$user\" adm"
+    echo "Removed unauthorized admin: $user" >> "$SUMMARY_FILE"
+  fi
+done <<< "$CURRENT_ADMINS"
+
+
+# --- Final Summary ---
+echo -e "\n=========================================================="
+echo " Shrish's User Script Complete!"
+echo " Mode: $([[ $TESTRUN == true ]] && echo "TEST RUN" || echo "LIVE RUN")"
+echo " Summary saved to: $SUMMARY_FILE"
+echo "=========================================================="
+cat "$SUMMARY_FILE"
