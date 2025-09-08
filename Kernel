@@ -824,4 +824,11 @@ echo 34402 | sudo tee /proc/sys/user/max_user_namespaces
 echo 34402 | sudo tee /proc/sys/user/max_uts_namespaces
 
 #VM
-echo
+echo 1 | sudo tee /proc/sys/vm/memory_failure_early_kill
+echo 0 | sudo tee /proc/sys/vm/nr_hugepages
+echo 0 | sudo tee /proc/sys/vm/oom_dump_tasks
+echo 0 | sudo tee /proc/sys/vm/panic_on_oom
+echo 2 | sudo tee /proc/sys/vm/overcommit_memory
+echo 80 | sudo tee /proc/sys/vm/overcommit_ratio
+echo 10 | sudo tee /proc/sys/vm/swappiness
+echo 65536 | sudo tee /proc/sys/vm/mmap_min_addr
